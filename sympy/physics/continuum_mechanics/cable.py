@@ -5,6 +5,9 @@ to 2D Cables.
 
 from sympy.core.sympify import sympify
 from sympy.core.symbol import Symbol
+from sympy import sin, cos, tan, pi, atan, solve
+from sympy.physics.vector import *
+
 
 class Cable:
     """
@@ -33,6 +36,7 @@ class Cable:
     >>> c.loads_position
     {'P': [2, 7], 'Q': [6, 4]}
     """
+
     def __init__(self, support_1, support_2):
         """
         Initializes the class.
@@ -92,8 +96,8 @@ class Cable:
             self._support_labels.append(support_1[0])
 
         for i in self._support_labels:
-            self._reaction_loads[Symbol("R_"+ i +"_x")] = 0
-            self._reaction_loads[Symbol("R_"+ i +"_y")] = 0
+            self._reaction_loads[Symbol("R_" + i + "_x")] = 0
+            self._reaction_loads[Symbol("R_" + i + "_y")] = 0
 
     @property
     def supports(self):
@@ -167,8 +171,8 @@ class Cable:
         >>> c.length
         20
         """
-        dist = ((self._left_support[0] - self._right_support[0])**2
-                - (self._left_support[1] - self._right_support[1])**2)**(1/2)
+        dist = ((self._left_support[0] - self._right_support[0]) ** 2
+                - (self._left_support[1] - self._right_support[1]) ** 2) ** (1 / 2)
 
         if length < dist:
             raise ValueError("length should not be less than the distance between the supports")
@@ -209,7 +213,7 @@ class Cable:
             raise ValueError("No support exists with the given label")
 
         i = self._support_labels.index(label)
-        rem_label = self._support_labels[(i+1)%2]
+        rem_label = self._support_labels[(i + 1) % 2]
         x1 = self._supports[rem_label][0]
         y1 = self._supports[rem_label][1]
 
@@ -243,8 +247,8 @@ class Cable:
             self._support_labels.insert(0, new_support[0])
 
         for i in self._support_labels:
-            self._reaction_loads[Symbol("R_"+ i +"_x")] = 0
-            self._reaction_loads[Symbol("R_"+ i +"_y")] = 0
+            self._reaction_loads[Symbol("R_" + i + "_x")] = 0
+            self._reaction_loads[Symbol("R_" + i + "_y")] = 0
 
     def apply_load(self, order, load):
         """
@@ -383,3 +387,95 @@ class Cable:
                 else:
                     self._loads['point_load'].pop(i)
                     self._loads_position.pop(i)
+
+    def solve_for_reaction_loads(self):
+        """
+        This method solves for the reaction loads at the supports.
+
+        Parameters
+        ==========
+        None
+
+        Examples
+        ========
+        >>> from sympy.physics.continuum_mechanics.cable import Cable
+        >>> c = Cable(('A', 0, 10), ('B', 10, 10))
+        >>> c.apply_load(-1, ('Q', 6, 4, 2, 270))
+        >>> c.apply_load(-1, ('P', 2, 7, 3, 270))
+        >>> c.loads
+        {'distributed': {}, 'point_load': {'Q': [2, 270], 'P': [3, 270]}}
+        >>> c.solve_for_reaction_loads()
+        >>> c.reaction_loads
+        {R_A_x: -6/5, R_A_y: 9/5, R_B_x: 32/15, R_B_y: 16/5}
+        """
+
+        x_left = self._left_support[0]
+        y_left = self._left_support[1]
+        x_right = self.right_support[0]
+        y_right = self.right_support[1]
+        N = ReferenceFrame('N')
+        # zero vectors initialized
+        reaction_1 = 0
+        reaction_2 = 0
+
+        if len(self._loads["point_load"]) != 0:
+            # sorting the point loads in the order of their x coordinates
+            sorted_point_loads = sorted(self._loads["point_load"].items(),
+                                        key=lambda load: self._loads_position[load[0]][0])
+
+            for point_load_pos in sorted_point_loads:
+                point_load = point_load_pos[0]
+                x = self._loads_position[point_load][0]
+                y = self._loads_position[point_load][1]
+                magnitude = self._loads["point_load"][point_load][0]
+                direction = self._loads["point_load"][point_load][1]
+                direction = (direction / 180) * pi
+
+                # creating vectors so that we can calculate the moment by cross product
+                # about the left support
+                dist_vect_left = (x - x_left) * N.x + (y - y_left) * N.y
+                force_vect = magnitude * cos(direction) * N.x + magnitude * sin(direction) * N.y
+                moment_vect_left = dist_vect_left.cross(force_vect)
+                reaction_1 += moment_vect_left.dot(N.z)
+
+                # about the right support
+                dist_vect_right = (x - x_right) * N.x + (y - y_right) * N.y
+                moment_vect_right = dist_vect_right.cross(force_vect)
+                reaction_2 += moment_vect_right.dot(N.z)
+
+            rightmost_load = sorted_point_loads[-1][0]
+            leftmost_load = sorted_point_loads[0][0]
+            right_support_resultant_angle = atan((y_right - self._loads_position[rightmost_load][1]) /
+                                                 (x_right - self._loads_position[rightmost_load][0]))
+            left_support_resultant_angle = atan((y_left - self._loads_position[leftmost_load][1]) /
+                                                (x_left - self._loads_position[leftmost_load][0]))
+
+            # vector between the supports (r)
+            r = (x_right - x_left) * N.x + (y_right - y_left) * N.y
+            # right resultant magnitude (RRM) and left resultant magnitude (LRM)
+            rrm = Symbol("RRM")
+            right_resultant_vector = rrm * cos(right_support_resultant_angle) * N.x + rrm * sin(
+                right_support_resultant_angle) * N.y
+            lrm = Symbol("LRM")
+            left_resultant_vector = lrm * cos(left_support_resultant_angle) * N.x + lrm * sin(
+                left_support_resultant_angle) * N.y
+
+            reaction_1 += r.cross(left_resultant_vector).dot(N.z)
+            reaction_2 += (-r).cross(right_resultant_vector).dot(N.z)
+
+            # solve the equations for RRM and LRM
+            rrm_val = solve(reaction_2, rrm)
+            lrm_val = solve(reaction_1, lrm)
+
+            self._reaction_loads[Symbol("R_" + self._support_labels[1] + "_x")] = rrm_val[0] * cos(
+                right_support_resultant_angle)
+            self._reaction_loads[Symbol("R_" + self._support_labels[1] + "_y")] = rrm_val[0] * sin(
+                right_support_resultant_angle)
+            self._reaction_loads[Symbol("R_" + self._support_labels[0] + "_x")] = lrm_val[0] * cos(
+                left_support_resultant_angle)
+            self._reaction_loads[Symbol("R_" + self._support_labels[0] + "_y")] = lrm_val[0] * sin(
+                left_support_resultant_angle)
+
+        elif len(self._loads["distributed_load"]) != 0:
+            for distributed_load in self._loads["distributed"]:
+                magnitude = self._loads["distributed"][distributed_load]
