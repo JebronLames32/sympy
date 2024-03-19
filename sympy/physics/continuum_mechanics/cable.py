@@ -64,6 +64,8 @@ class Cable:
         self._loads_position = {}
         self._length = 0
         self._reaction_loads = {}
+        self._tension = {}
+        self._lowest_x_global = sympify(0)
 
         if support_1[0] == support_2[0]:
             raise ValueError("Supports can not have the same label")
@@ -388,11 +390,56 @@ class Cable:
                     self._loads['point_load'].pop(i)
                     self._loads_position.pop(i)
 
-    def solve_for_reaction_loads(self):
+    def point_on_load_parabola(self, *args):
+        """
+        This method is used for obtaining points on the parabola given the coordinates of the left support, right
+        support and the lowest point of the cable for a uniformly distributed load. It returns the y coordinate of the
+        point on the parabola given the x coordinate as the query point.
+
+        Parameters
+        ==========
+        The lowest point of the cable is given by the x and y coordinates as
+        x: Sympifyable
+            The x coordinate of the lowest point
+        y: Sympifyable
+            The y coordinate of the lowest point
+
+        x_cable: Sympifyable, the x coordinate of the point on the cable
+
+        Examples
+        ========
+        >>> from sympy.physics.continuum_mechanics.cable import Cable
+        >>> c = Cable(('A', 0, 10), ('B', 10, 10))
+        >>> c.apply_load(-1, ('Z', 5, 5, 12, 30))
+        >>> c.point_on_load_parabola()
+        (5, 5)
+        """
+        x_lowest = sympify(args[0])
+        y_lowest = sympify(args[1])
+        x = sympify(args[2])
+        x_left = self._left_support[0]
+        y_left = self._left_support[1]
+        x_right = self._right_support[0]
+        y_right = self._right_support[1]
+
+        # equation of the parabola in vertex form is y = a(x - h)^2 + k
+        a = (y_right - y_lowest) / (x_right - x_lowest) ** 2
+
+        y = a * (x - x_lowest) ** 2 + y_lowest
+
+        return y
+
+    def solve_for_reaction_loads(self, *args):
         """
         This method solves for the reaction loads at the supports.
 
         Parameters
+        For distributed load, the x and y coordinates of the lowest point of the cable are
+        required as
+        x: Sympifyable
+            The x coordinate of the lowest point
+        y: Sympifyable
+            The y coordinate of the lowest point
         ==========
         None
 
@@ -417,6 +464,8 @@ class Cable:
         # zero vectors initialized
         reaction_1 = 0
         reaction_2 = 0
+        # vector between the supports (r)
+        r = (x_right - x_left) * N.x + (y_right - y_left) * N.y
 
         if len(self._loads["point_load"]) != 0:
             # sorting the point loads in the order of their x coordinates
@@ -450,8 +499,6 @@ class Cable:
             left_support_resultant_angle = atan((y_left - self._loads_position[leftmost_load][1]) /
                                                 (x_left - self._loads_position[leftmost_load][0]))
 
-            # vector between the supports (r)
-            r = (x_right - x_left) * N.x + (y_right - y_left) * N.y
             # right resultant magnitude (RRM) and left resultant magnitude (LRM)
             rrm = Symbol("RRM")
             right_resultant_vector = rrm * cos(right_support_resultant_angle) * N.x + rrm * sin(
@@ -467,15 +514,46 @@ class Cable:
             rrm_val = solve(reaction_2, rrm)
             lrm_val = solve(reaction_1, lrm)
 
-            self._reaction_loads[Symbol("R_" + self._support_labels[1] + "_x")] = rrm_val[0] * cos(
-                right_support_resultant_angle)
-            self._reaction_loads[Symbol("R_" + self._support_labels[1] + "_y")] = rrm_val[0] * sin(
-                right_support_resultant_angle)
-            self._reaction_loads[Symbol("R_" + self._support_labels[0] + "_x")] = lrm_val[0] * cos(
-                left_support_resultant_angle)
-            self._reaction_loads[Symbol("R_" + self._support_labels[0] + "_y")] = lrm_val[0] * sin(
-                left_support_resultant_angle)
-
-        elif len(self._loads["distributed_load"]) != 0:
+        elif len(self._loads["distributed"]) != 0:
+            x_lowest = sympify(args[0])
+            y_lowest = sympify(args[1])
             for distributed_load in self._loads["distributed"]:
-                magnitude = self._loads["distributed"][distributed_load]
+                magnitude = self._loads["distributed"][distributed_load] * (x_right - x_left)
+                # right half of the cable
+                right_support_resultant_angle = atan(2 * (y_right - y_lowest) / (x_right - x_lowest))
+                rrm = Symbol("RRM")
+                right_resultant_vector = rrm * cos(right_support_resultant_angle) * N.x + rrm * sin(
+                    right_support_resultant_angle) * N.y
+                # left half of the cable
+                left_support_resultant_angle = atan(2 * (y_left - y_lowest) / (x_left - x_lowest))
+                lrm = Symbol("LRM")
+                left_resultant_vector = lrm * cos(left_support_resultant_angle) * N.x + lrm * sin(
+                    left_support_resultant_angle) * N.y
+
+                x_mid = (x_left + x_right) / 2
+                y_mid = self.point_on_load_parabola(x_lowest, y_lowest, x_mid)
+
+                dist_vect_left = (x_mid - x_left) * N.x + (y_mid - y_left) * N.y
+                force_vect = magnitude * N.y
+                moment_vect_left = dist_vect_left.cross(force_vect)
+                reaction_1 -= moment_vect_left.dot(N.z)
+
+                dist_vect_right = (x_mid - x_right) * N.x + (y_mid - y_right) * N.y
+                moment_vect_right = dist_vect_right.cross(force_vect)
+                reaction_2 -= moment_vect_right.dot(N.z)
+
+                reaction_1 += r.cross(left_resultant_vector).dot(N.z)
+                reaction_2 += (-r).cross(right_resultant_vector).dot(N.z)
+
+                rrm_val = solve(reaction_2, rrm)
+                lrm_val = solve(reaction_1, lrm)
+
+        self._reaction_loads[Symbol("R_" + self._support_labels[1] + "_x")] = rrm_val[0] * cos(
+            right_support_resultant_angle)
+        self._reaction_loads[Symbol("R_" + self._support_labels[1] + "_y")] = rrm_val[0] * sin(
+            right_support_resultant_angle)
+        self._reaction_loads[Symbol("R_" + self._support_labels[0] + "_x")] = lrm_val[0] * cos(
+            left_support_resultant_angle)
+        self._reaction_loads[Symbol("R_" + self._support_labels[0] + "_y")] = lrm_val[0] * sin(
+            left_support_resultant_angle)
+
